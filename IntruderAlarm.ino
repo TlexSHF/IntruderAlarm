@@ -1,24 +1,27 @@
 #include <Keypad.h>
 #include <EEPROM.h>
-bool gatherPinCode(char* pin, bool timeoutEnabled = false, char initKey = 0);
+#include <Adafruit_GFX.h>    // Core graphics library
+#include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
 
-/* Intruder Alarm Verification */
-//TODO:
-// Using the Membrane Switch ->
-//    A: Turn on alarm -> loop while !pin
-//    B: Change Pin Code (init: 0000)
-//    Pin Code can only consist of digits 0-9 CHECK
+//SIMONES TODO LIST:
+// #1 Få all tekst fra seriell monitor -> over til tft display!
+// NOTE: fjernet options for størrelse og farge, kan adde igjen senere om nødvendig
+// * En gang: Fiks så wrapping ikke skjer midt i ord
 
-//    Display actions on display
 
-//    Id chip will have ability to store a pin code
-//    Will it also have some sort of ID that is neccessary?
-//          Is this solution for a home or office?
+/* Adafruit defines */
+#define TFT_CS    10
+#define TFT_RST   -1
+#define TFT_DC    8
 
+/* --- INITIALIZATIONS --- */
+/* Keypad */
 const byte ROWS = 4;
 const byte COLS = 4;
 
-//Position of ascii characters on Keypad
+byte rowPins[ROWS] = {A0, A1, A2, A3};
+byte colPins[COLS] = {5, 4, 3, 2};
+
 char hexaKeys[ROWS][COLS] = {
   {'1', '2', '3', 'A'},
   {'4', '5', '6', 'B'},
@@ -26,13 +29,14 @@ char hexaKeys[ROWS][COLS] = {
   {'*', '0', '#', 'D'}
 };
 
-//Assigning pins
-byte rowPins[ROWS] = {A0, A1, A2, A3};
-byte colPins[COLS] = {5, 4, 3, 2};
-//Creating Keypad
 Keypad myKeypad = Keypad(makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS);
 
-/*  FIRST Address in Eeprom reserved to say whether 
+/* Adafruit Display */
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+/* -------------------------------------- */
+
+/*  FIRST Address in Eeprom reserved to say whether
     the device has a stored pin or not.
     If 1 -> Pin Code exists  */
 uint8_t gStartAddr = 1;
@@ -42,12 +46,25 @@ char gPinCode[] = {'0', '0', '0', '0'}; //default code for new devices
 unsigned long timeNow = 0;
 uint8_t period = 1000; //Weird bug... this is not 1 sec... why?
 
+int gTextColor = ST77XX_GREEN;
+int gBackColor = ST77XX_BLACK;
+uint8_t gTextSize = 1;
+
+/* --- FUNCTION DECLARATIONS --- */
+bool gatherPinCode(char* pin, bool timeoutEnabled = false, char initKey = 0);
+void writeText(const char* text, uint8_t textSize = gTextSize, int textColor = gTextColor);
+void appendText(const char* text, uint8_t textSize = gTextSize, int textColor = gTextColor);
+
 
 void setup() {
   Serial.begin(9600);
+  Serial.println("Init begin");
 
-  if(EEPROM.read(0) == 1) {
-    retrievePinFromEEPROM();    // setting gPinCode to what is stored in EEPROM  
+  tft.init(135, 240);
+  writeText("Starting up device...");
+
+  if (EEPROM.read(0) == 1) {
+    retrievePinFromEEPROM();    // setting gPinCode to what is stored in EEPROM
   } else {
     updatePinInEEPROM(gPinCode);    // put the default pinCode into the EEPROM
     EEPROM.update(0, 1);    //First addr: If 1 -> Pin Code Exists
@@ -55,10 +72,13 @@ void setup() {
   }
 
   Serial.println("Init complete");
+  delay(2000); //wait before showing main menu
   Serial.println("A: Turn on alarm \nB: Change Pin Code \nC: Save pin to keyCard");
 }
 
 void loop() {
+  //Only writes once every change of text
+  writeText("A: Turn on alarm \n\nB: Change Pin Code \n\nC: Save pin to keyCard\n");
 
   char key = myKeypad.getKey();
 
@@ -92,6 +112,8 @@ void alarmOn() {
   uint8_t wrongAttempts = 0;
 
   while (!pinCorrect && wrongAttempts < 4) {
+    writeText("ALARM IS ON!\n");
+
     bool pinGathered = false;
 
     // --- Getting pin from user ---
@@ -100,26 +122,34 @@ void alarmOn() {
 
     if (key) {
       //Gathering Pin
-      Serial.println("gathering pin code...");
+      Serial.println("gathering pin code...\n");
+      appendText("gathering pin code...");
       if (gatherPinCode(pinAttempt, true, key)) {
-        Serial.println("\nPin Gathered");
+      Serial.println("Pin Gathered");
+        appendText("Pin Gathered\n");
 
         //Validating
         pinCorrect = isCorrectPin(pinAttempt);
         if (pinCorrect == false) {
           Serial.println("Error: Incorrect pin code");
+          appendText("ERROR: INCORRECT PIN CODE");
           wrongAttempts++;
           if (wrongAttempts == 4) {
             Serial.println("ERROR: TOO MANY INCORRECT ATTEMPTS. CALLING POLICE!");
+            appendText("ERROR: TOO MANY INCORRECT ATTEMPTS. CALLING POLICE!");
+
           }
         }
       }
     }
   }
-  if (pinCorrect)
+  if (pinCorrect) {
     Serial.println("Success: Alarm turned off");
+    writeText("Alarm turns off...");
+  }
 }
 
+/* --- PIN CODE --- */
 void changePinCode() {
   //TODO Make so that pin code is not stored in plain text, but rather generate a key out of entered pin code, TODOOO
   // which have to match pin code XOR/OR/AND % something something --- EPROM i Arduino
@@ -198,6 +228,7 @@ void assignNewPin(char* newPin) {
   }
 }
 
+/* --- EEPROM --- */
 void retrievePinFromEEPROM() {
   char tempPin[gPinSize];
   for (int i = 0; i < gPinSize && i < EEPROM.length(); i++) {
@@ -228,4 +259,36 @@ void updatePinInEEPROM(char* pin) {
     Serial.println("updating address in EEPROM");
     EEPROM.update(i + gStartAddr, pin[i]);
   }
+}
+
+/* --- DISPLAY --- */
+void textSetupClear() {
+  tft.setTextWrap(true);
+  tft.fillScreen(gBackColor);
+  tft.setCursor(0, 30);
+}
+
+void writeText(const char* text, uint8_t textSize = gTextSize, int textColor = gTextColor) {
+  static const char* prevText = 0;
+  //Only writes if the content changes
+  if (prevText != text) {
+    Serial.println("Writes to display");
+    textSetupClear();
+    appendText(text);
+    prevText = text;
+  }
+}
+
+void appendText(const char* text, uint8_t textSize = gTextSize, int textColor = gTextColor) {
+  //TODO Her trengs det egt ikke å settes color og størrelse, men kanskje beholde til vi evt bruker det senere?
+  tft.setTextColor(gTextColor);
+  tft.setTextSize(gTextSize);
+  tft.println(text);
+}
+
+void toRunar() {
+  writeText("Henlo Runar!", 1, ST77XX_YELLOW);
+  appendText("My love!", 2, ST77XX_BLUE);
+  appendText("Love u!", 3, ST77XX_GREEN);
+  appendText("<3", 4, ST77XX_RED);
 }
